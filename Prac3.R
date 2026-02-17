@@ -57,3 +57,18 @@ LCM=rast("LCMUK.tif")
 
 #crop to the extent of the study area plus a little more (because we will lose a small amount of data in the next step)
 LCM=crop(LCM,st_buffer(scot, dist= 1000))
+
+#aggregate LCM raster
+LCM=aggregate(LCM$LCMUK_1,fact=4,fun="modal")
+#project squirrel data
+sciurus.sp=st_transform(sciurus.sp,crs(LCM))
+#now crop our points to the study area
+sciurusFin=sciurus.sp[scot,]
+
+#finally, mask the LCM to this boundary
+
+LCM=crop(LCM,scot,mask=TRUE)
+
+#inspect
+plot(LCM)
+plot(sciurusFin$geometry,add=T)
