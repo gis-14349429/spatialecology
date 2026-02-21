@@ -1,5 +1,5 @@
 
-setwd("C:/Users/s16188ss/OneDrive - The University of Manchester/GEOG71922/WEEK3/spatialecology")
+setwd("C:/Users/User/OneDrive - The University of Manchester/GEOG71922/WEEK3/spatialecology")
 
 #Install packages
 
@@ -212,4 +212,292 @@ plot(demScot)
 #stack the covariate layers together
 allEnv=c(lcm_wood_1800,lcm_urban_2300,demScot)
 
+all.cov=st_drop_geometry(all.cov)
+
 names(allEnv)=c("broadleaf","urban","elev")
+set.seed(11)
+
+#sample background - one point for every cell (9775)
+back = spatSample(allEnv,size=2000,as.points=TRUE,method="random",na.rm=TRUE) 
+back=back[!is.na(back$broadleaf),]
+
+back=st_as_sf(back,crs="EPSG:27700")
+# get environmental covariates at presence locations
+eP=terra::extract(allEnv,sciurusFin)
+
+#bind together the presence data using cbind() which binds together objects by column (i.e. with different columns but the same number of rows)
+Pres.cov=st_as_sf(cbind(eP,sciurusFin))
+
+Pres.cov$Pres=1
+
+
+#Remove the first column which is just an ID field.
+Pres.cov=Pres.cov[,-1]
+
+#get coordinates for spatial cross-validation later
+coordsPres=st_coordinates(Pres.cov)
+
+#drop geometry column using st_drop_geometry()
+Back.cov=st_as_sf(data.frame(back,Pres=0))
+
+
+#get coordinates of background points for cross validation later
+coordsBack=st_coordinates(back)
+
+#combine
+coords=data.frame(rbind(coordsPres,coordsBack))
+
+#assign column names
+colnames(coords)=c("x","y")
+#combine pres and background
+all.cov=rbind(Pres.cov,Back.cov)
+
+#add coordinates
+all.cov=cbind(all.cov,coords)
+
+
+#remove any NAs
+all.cov=na.omit(all.cov)
+all.cov=st_drop_geometry(all.cov)
+library(mlr)
+task=all.cov
+head(all.cov)
+task$Pres=as.factor(task$Pres)
+
+task = makeClassifTask(data = task[,c(1:4)], target = "Pres",
+                       positive = "1", coordinates = task[,5:6])
+################ Binomial (logistic regression)
+
+#use the make learner function to build the model approach. Fix factors prediction is set to TRUE here because our outcome is a factor (i.e. categorical: 0-1)
+lrnBinomial = makeLearner("classif.binomial",
+                          predict.type = "prob",
+                          fix.factors.prediction = TRUE)
+
+
+
+##########Random Forest
+
+install.packages("ranger")
+library(ranger)
+lrnRF = makeLearner("classif.ranger",
+                    predict.type = "prob",
+                    fix.factors.prediction = TRUE)
+#set up resampling strategy (non-spatial cross-validation)
+perf_levelCV = makeResampleDesc(method = "RepCV", predict = "test", folds = 5, reps = 5)
+
+#set up resampling strategy for spatial cross-validation
+
+perf_level_spCV = makeResampleDesc(method = "SpRepCV", folds = 5, reps = 5) #sampling strategy to run five fold re-sampling five times
+#Binomial conventional cross validation (K fold)
+
+
+cvBinomial = resample(learner = lrnBinomial, task =task,
+                      resampling = perf_levelCV, 
+                      measures = mlr::auc,
+                      show.info = FALSE)
+
+print(cvBinomial)
+#create Spatial Resampling Plots
+plots = createSpatialResamplingPlots(task,resample=cvBinomial,
+                                     crs=crs(allEnv),datum=crs(allEnv),color.test = "red",point.size = 1)
+
+library(cowplot)
+#use the cowplot function to plot all folds out in a grid
+cowplot::plot_grid(plotlist = plots[["Plots"]], ncol = 3, nrow = 2,
+                   labels = plots[["Labels"]])
+##Binomial spatial cross validation
+
+sp_cvBinomial = resample(learner = lrnBinomial, task =task,
+                         resampling = perf_level_spCV, 
+                         measures = mlr::auc,
+                         show.info = FALSE)
+
+print(sp_cvBinomial)
+#make partition plots
+plotsSP = createSpatialResamplingPlots(task,resample=sp_cvBinomial,
+                                       crs=crs(allEnv),datum=crs(allEnv),color.test = "red",point.size = 1)
+
+#use the cowplot function to plot all folds out in a grid
+cowplot::plot_grid(plotlist = plotsSP[["Plots"]], ncol = 3, nrow = 2,
+                   labels = plotsSP[["Labels"]])
+###### Random Forest evaluation
+
+
+##random sampling cross-validation
+
+cvRF = resample(learner = lrnRF, task =task,
+                resampling = perf_levelCV, 
+                measures = mlr::auc,
+                show.info = FALSE)
+
+print(cvRF)
+#spatial partitioning cross-validation
+
+sp_cvRF = resample(learner = lrnRF, task =task,
+                   resampling = perf_level_spCV, 
+                   measures = mlr::auc,
+                   show.info = FALSE)
+
+print(sp_cvRF)
+getParamSet(lrnRF)
+paramsRF = makeParamSet(
+  makeIntegerParam("mtry",lower = 1,upper = 3),
+  makeIntegerParam("min.node.size",lower = 1,upper = 20),
+  makeIntegerParam("num.trees",lower = 100,upper = 500)
+)
+# specifying random parameter value search
+
+tune_level = makeResampleDesc(method = "SpCV", iters = 5)
+
+ctrl = makeTuneControlRandom(maxit = 50)
+tuned_RF = tuneParams(learner = lrnRF,
+                      task = task,
+                      resampling = tune_level,
+                      measures = mlr::auc,
+                      par.set = paramsRF,
+                      control = ctrl,
+                      show.info = FALSE)
+
+print(tuned_RF)
+# make a grid for spatial blocking
+
+area_grid = st_make_grid(sciurusFin, c(50000, 50000), what = "polygons", square = T)
+area_grid_sf=st_as_sf(area_grid)
+
+#the original grid from st_make_grid() is contained in a list so we can use the position of each square of that list as its ID.
+area_grid_sf$grid_id=1:length(lengths(area_grid))
+# plot
+plot(area_grid_sf$x)
+
+#check all points in correct place
+plot(sciurusFin$geometry,add=T)
+# set folds
+folds=area_grid_sf$grid_id
+
+dataPoints=st_as_sf(all.cov,coords = c("x","y"))
+
+st_crs(dataPoints)=crs(area_grid_sf)
+library(dismo)
+library(maxnet)
+library(glmnet)
+
+#set number of folds to use
+folds=5
+
+#partition presence and background data and assign to folds using the kfold() function.
+
+Pres.cov=all.cov[all.cov$Pres==1,]
+Back.cov=all.cov[all.cov$Pres==0,]
+
+
+kfold_pres = kfold(Pres.cov, folds)
+kfold_back = kfold(Back.cov, folds)
+
+eMax=list()
+
+for (i in 1:folds) {
+  train = Pres.cov[kfold_pres!= i,]
+  test = Pres.cov[kfold_pres == i,]
+  backTrain=Back.cov[kfold_back!=i,]
+  backTest=Back.cov[kfold_back==i,]
+  dataTrain=rbind(train,backTrain)
+  dataTest=rbind(test,backTest)
+  maxnetMod=maxnet(dataTrain$Pres, dataTrain[,1:3])
+  
+  eMax[[i]] = evaluate(p=dataTest[ which(dataTest$Pres==1),],a=dataTest[which(dataTest$Pres==0),],maxnetMod)
+}
+
+#print the result
+
+aucMax = sapply(eMax, function(x){slot(x, 'auc')} )
+
+print(mean(aucMax))
+#load precrec for more versatile model evaluation methods
+library(precrec)
+
+folds=area_grid_sf$grid_id
+
+maxEvalList=list()
+for (i in folds) {
+  
+  
+  
+  #select fold - select all folds which are not 'i' to train the model
+  gridTrain=subset(area_grid_sf,area_grid_sf$grid_id!=i)
+  
+  #spatially subset the training data
+  train=data.frame(st_drop_geometry(st_intersection(gridTrain, dataPoints)))
+  
+  #spatially subset the test data 
+  gridTest=subset(area_grid_sf,area_grid_sf$grid_id==i)
+  
+  
+  test=data.frame(st_drop_geometry(st_intersection(gridTest, dataPoints)))  
+  
+  
+  #build model
+  train
+  maxnetMod=maxnet(train$Pres, train[1:3],
+                   classes="lq")   
+  
+  
+  #make prediction
+  pred=predict(maxnetMod, test,type="cloglog")
+  
+  #use precrec to get roc curves
+  precrec_proc=evalmod(scores = pred,labels = test$Pres,mode = "prcroc")
+  
+  
+  #get auc value
+  modauc=precrec::auc(precrec::evalmod(scores = pred, 
+                                       labels = test$Pres))
+  
+  
+  #add to list
+  maxEvalList[[i]]=modauc$aucs[1]
+  
+  #track
+  print(i)
+  
+}
+mean(unlist(maxEvalList))
+#Specify the model
+glm.sciurus=glm(Pres~broadleaf+urban+elev,binomial(link='logit'),
+                data=all.cov)
+
+#predict and inspect the output
+prGLM=predict(allEnv,glm.sciurus,type="response")
+
+#plot
+plot(prGLM)
+#build new data frame based on mean of elev and urban but varying values for broadleaf. 
+glmNew=data.frame(broadleaf=seq(0,max(all.cov$broadleaf),length=1000),
+                  elev=mean(all.cov$elev),
+                  urban=mean(all.cov$urban))
+
+
+# use type = "response" for probability-scale predictions and chose to return the standard error of the prediction (se.fit=TRUE)   
+preds = predict(glm.sciurus, newdata = glmNew, type = "response", se.fit = TRUE)
+glmNew$fit = preds$fit
+glmNew$se = preds$se.fit
+
+head(glmNew)
+library(ggplot2)
+#use ggplot to plot the fitted values against the broadleaf variable. Use the ribbon() function in ggplot to add a 95% confidence interval.
+
+
+ggplot(glmNew, aes(x = broadleaf, y = fit)) +
+  
+  geom_ribbon(data = glmNew, aes(y = fit, ymin = fit - 1.96 * se, ymax = fit + 1.96 * se),
+              fill = "blue", alpha = 0.3) +
+  geom_line(data = glmNew, aes(y = fit)) 
+#build new data frame based on mean of elev and broadleaf but varying values for urban. 
+glmNewUrban=data.frame(urban=seq(0,max(all.cov$urban),length=1000),
+                       elev=mean(all.cov$elev),
+                       broadleaf=mean(all.cov$broadleaf))
+
+
+# use type = "response" for probability-scale predictions    
+predUrban = predict(glm.sciurus, newdata = glmNewUrban, type = "response", se.fit = TRUE)
+glmNewUrban$fit = predUrban$fit
+glmNewUrban$se = predUrban$se.fit
