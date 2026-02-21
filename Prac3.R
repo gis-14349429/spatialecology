@@ -501,3 +501,94 @@ glmNewUrban=data.frame(urban=seq(0,max(all.cov$urban),length=1000),
 predUrban = predict(glm.sciurus, newdata = glmNewUrban, type = "response", se.fit = TRUE)
 glmNewUrban$fit = predUrban$fit
 glmNewUrban$se = predUrban$se.fit
+ggplot(glmNewUrban, aes(x = urban, y = fit)) +
+  
+  geom_ribbon(data = glmNewUrban, aes(y = fit, ymin = fit - 1.96 * se, ymax = fit + 1.96 * se),
+              fill = "blue", alpha = 0.3) +
+  geom_line(data = glmNewUrban, aes(y = fit)) 
+#build new data frame based on mean of broaleaf and urban but varying values for elev. 
+glmNewElev=data.frame(elev=seq(0,max(all.cov$elev),length=1000),
+                      urban=mean(all.cov$urban),
+                      broadleaf=mean(all.cov$broadleaf))
+
+
+# use type = "response" for probability-scale predictions    
+predElev = predict(glm.sciurus, newdata = glmNewElev, type = "response", se.fit = TRUE)
+glmNewElev$fit = predElev$fit
+glmNewElev$se = predElev$se.fit
+ggplot(glmNewElev, aes(x = elev, y = fit)) +
+  
+  geom_ribbon(data = glmNewElev, aes(y = fit, ymin = fit - 1.96 * se, ymax = fit + 1.96 * se),
+              fill = "blue", alpha = 0.3) +
+  geom_line(data = glmNewElev, aes(y = fit)) 
+#Specify the glm model using the appropriate polynomial term for boradleaf
+
+glm.sciurus=glm(Pres~poly(broadleaf,3)+urban+elev,binomial(link='logit'),
+                data=all.cov)
+#load spatstat
+library(spatstat)
+
+#convert broadleaf object
+broadleafIm=raster.as.im(raster(allEnv$broadleaf))
+
+#convert urban object
+urbanIm=raster.as.im(raster(allEnv$urban))
+
+#convert elevation object
+elevIm=raster.as.im(raster(allEnv$elev))
+#create study window using the broadleafIm image object as a template
+window.poly=as.owin(urbanIm)
+
+plot(window.poly)#inspect
+#get coordinates from our sciurusFin object to create point pattern
+sciurusCoords=st_coordinates(sciurusFin) 
+
+#create point pattern ('ppp') object with the ppp() function
+pppSciurus=ppp(sciurusCoords[,1],sciurusCoords[,2], window = window.poly)
+#inspect
+plot(allEnv$broadleaf)
+
+plot(pppSciurus,add=T)
+#use as.ppp() to remove points outside the window
+pppSciurus=as.ppp(pppSciurus)
+#rescale from m to km
+pppSciurus=spatstat.geom::rescale(pppSciurus, 1000)
+
+#rescale image objects to conform with the point pattern 
+
+broadleafIm=spatstat.geom::rescale(broadleafIm,1000)
+elevIm=spatstat.geom::rescale(elevIm,1000)
+urbanIm=spatstat.geom::rescale(urbanIm,1000)
+Kcsr=envelope(pppSciurus,Kest,nsim=39,VARIANCE=T,nSD=1,global =TRUE)
+plot(Kcsr,shade=c("hi","lo"),legend=T) #check whether our data fall within this envelope
+ndTry=seq(100,1000,by=100)
+
+
+for(i in ndTry){
+  #build quadrature scheme
+  Q.i=quadscheme(pppSciurus,method = "grid",nd=i)
+  #run a simple model
+  fit.i=ppm(Q.i~broadleafIm+elevIm+urbanIm)
+  print(i)
+  #print the AIC statistic
+  print(AIC(fit.i))
+}
+Q=quadscheme(pppSciurus,method = "grid",nd=900)
+plot(rhohat(pppSciurus,broadleafIm)) # broadleaf
+plot(rhohat(pppSciurus,elevIm)) # elevation
+plot(rhohat(pppSciurus,urbanIm)) # urban
+firstPPMod=ppm(Q~poly(broadleafIm,3)+poly(elevIm,2)+poly(urbanIm,2)+x+y) #point process model based on polynomial terms for the three covariates and the projected coordinates
+firstModEnv=envelope(firstPPMod,Kest,nsim=39,VARIANCE=TRUE,nSD=1,global =TRUE)
+plot(firstModEnv)
+thomasMod=kppm(Q~poly(broadleafIm,3)+poly(elevIm,2)+poly(urbanIm,2)+x+y,"Thomas") # apply Thomas cluster process to the data.
+thomasEnv=envelope(thomasMod,Kinhom,nsim=39,VARIANCE=TRUE,nSD=1,global=TRUE)
+plot(thomasEnv)
+plot(roc(thomasMod))
+auc.kppm(thomasMod)
+prPPMod=predict(thomasMod)
+
+plot(prPPMod)
+plot(rast(prPPMod))
+ppmRast=rast(prPPMod,)
+
+writeRaster(ppmRast,"ppmSciurus.tif")
